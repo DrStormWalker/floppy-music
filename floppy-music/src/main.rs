@@ -14,10 +14,13 @@
 
 use core::borrow::BorrowMut;
 use core::fmt::Write;
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::AtomicU32;
 
 use arrayvec::ArrayString;
 use arrayvec::ArrayVec;
 use embedded_hal::blocking::serial;
+use embedded_hal::digital::v2::PinState;
 use floppy_music_macros::midi_note_periods;
 // The macro for our start-up function
 use rp_pico::entry;
@@ -131,7 +134,7 @@ const fn get_cmd_len(cmd: u8) -> usize {
 ///
 /// Genertated using a proc macro to evaulate a constant expression see
 /// floppy_music_macros/src/lib.rs for details
-const NOTES: [u64; 128] = midi_note_periods!();
+const NOTES: [u32; 128] = midi_note_periods!();
 
 const NO_CMD: u8 = 0;
 const SYS_EX_CMD: u8 = 0xF0;
@@ -149,6 +152,9 @@ static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
 
 /// The USB Serial Device Driver (shared with the interrupt).
 static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
+
+static mut PLAYING: AtomicBool = AtomicBool::new(false);
+static mut PERIOD: AtomicU32 = AtomicU32::new(0u32);
 
 /// Entry point to our bare-metal application.
 ///
@@ -246,14 +252,33 @@ fn main() -> ! {
     );
 
     // Set the LED to be an output
-    let mut led_pin = pins.led.into_push_pull_output();
+    let mut step_pin = pins.gpio3.into_push_pull_output();
+    let mut dir_pin = pins.gpio2.into_push_pull_output();
+    let mut toggle_step = false;
+    let mut toggle_dir = false;
+    let mut i = 0;
 
     // Blink the LED at 1 Hz
     loop {
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        let period = unsafe {
+            if !PLAYING.load(atomic::Ordering::Relaxed) {
+                continue;
+            }
+
+            PERIOD.load(atomic::Ordering::Relaxed)
+        };
+
+        step_pin.set_state(PinState::from(toggle_step));
+        toggle_step = !toggle_step;
+
+        i += 1;
+
+        if i % 78 == 0 {
+            dir_pin.set_state(PinState::from(toggle_dir));
+            toggle_dir = !toggle_dir;
+        }
+
+        delay.delay_us(period);
     }
 }
 
@@ -322,6 +347,23 @@ fn handle_midi_msg(serial: &mut SerialPort<UsbBus>, msg: MidiMsg) {
     let mut buf = ArrayString::<128>::new();
     writeln!(&mut buf, "{:?}", msg);
     serial.write(buf.as_bytes());
+
+    match msg {
+        MidiMsg::NoteOn {
+            channel,
+            pitch,
+            velocity,
+        } => unsafe {
+            PERIOD.store(NOTES[pitch as usize - 24], atomic::Ordering::Relaxed);
+            PLAYING.store(true, atomic::Ordering::Relaxed)
+        },
+        MidiMsg::NoteOff {
+            channel,
+            pitch,
+            velocity,
+        } => unsafe { PLAYING.store(false, atomic::Ordering::Relaxed) },
+        _ => {}
+    }
 }
 
 // End of file
