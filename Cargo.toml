@@ -3,4 +3,5 @@ members = [
   "floppy-music-macros",
   "floppy-music",
   "floppy-music-middle",
+  "floppy-music-cli",
 ]
