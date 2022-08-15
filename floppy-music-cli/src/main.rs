@@ -1,4 +1,4 @@
-use std::error::Error;
+/*use std::error::Error;
 use std::io::{stdin, stdout, Write};
 use std::sync::Arc;
 use std::thread::{self, sleep};
@@ -153,5 +153,67 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     #[allow(unreachable_code)]
+    Ok(())
+}*/
+
+use std::{
+    fs,
+    io::{self, Write},
+};
+
+use floppy_music_middle::sequencer::MidiEngine;
+use midir::{MidiOutput, MidiOutputPort};
+use midly::{live::LiveEvent, Smf};
+use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = fs::read("/home/jcah/Portal - Still Alive.mid").unwrap();
+    let file = Smf::parse(&bytes).unwrap();
+
+    let midi_out = MidiOutput::new("My Test Output")?;
+
+    // Get an output port (read from console if multiple are available)
+    let out_ports = midi_out.ports();
+    let out_port: &MidiOutputPort = match out_ports.len() {
+        0 => return Err("no output port found".into()),
+        1 => {
+            println!(
+                "Choosing the only available output port: {}",
+                midi_out.port_name(&out_ports[0]).unwrap()
+            );
+            &out_ports[0]
+        }
+        _ => {
+            println!("\nAvailable output ports:");
+            for (i, p) in out_ports.iter().enumerate() {
+                println!("{}: {}", i, midi_out.port_name(p).unwrap());
+            }
+            print!("Please select output port: ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            out_ports
+                .get(input.trim().parse::<usize>()?)
+                .ok_or("invalid output port selected")?
+        }
+    };
+
+    let mut conn_out = midi_out.connect(out_port, "floppy-music").unwrap();
+
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let event = LiveEvent::parse(&msg).unwrap();
+            println!("Received event: {:?}", event);
+
+            let _ = conn_out.send(&msg);
+        }
+    });
+
+    let engine = MidiEngine::new(file);
+    engine.play_to(vec![None, Some(tx)]).await;
+
     Ok(())
 }
