@@ -164,7 +164,20 @@ use std::{
 use floppy_music_middle::sequencer::MidiEngine;
 use midir::{MidiOutput, MidiOutputPort};
 use midly::{live::LiveEvent, Smf};
-use tokio::sync::mpsc;
+use tokio::{io::AsyncReadExt, sync::mpsc};
+use tokio_serial::SerialStream;
+
+fn get_serial_port() -> Result<SerialStream, Box<dyn std::error::Error>> {
+    let ports = tokio_serial::available_ports()?;
+    println!("{:?}", ports);
+
+    let port = ports.first().unwrap();
+    println!("{:?}", port);
+
+    let port = SerialStream::open(&tokio_serial::new(port.port_name.clone(), 115_200))?;
+
+    Ok(port)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -199,6 +212,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let (pi_tx, mut pi_rx) = {
+        let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(100);
+        let (in_tx, in_rx) = mpsc::channel(100);
+
+        let mut serial_port = get_serial_port()?;
+
+        tokio::spawn(async move {
+            loop {
+                let mut buf = [0u8; 256];
+                tokio::select! {
+                    val = serial_port.read(&mut buf[..]) => {
+                        if let Ok(len) = val {
+                            let _ = in_tx.send(buf[..len].to_vec()).await;
+                        }
+                    }
+
+                    Some(msg) = out_rx.recv() => {
+                        let _ = serial_port.write(msg.as_slice());
+                    }
+
+                    else => {}
+                }
+            }
+        });
+
+        (out_tx, in_rx)
+    };
+
     let mut conn_out = midi_out.connect(out_port, "floppy-music").unwrap();
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
@@ -206,9 +247,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let event = LiveEvent::parse(&msg).unwrap();
-            println!("Received event: {:?}", event);
+            //println!("Received event: {:?}", event);
 
-            let _ = conn_out.send(&msg);
+            //let _ = conn_out.send(&msg);
+            pi_tx.send(msg).await;
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            if let Some(msg) = pi_rx.recv().await {
+                println!("Received: {:?}", String::from_utf8(msg).unwrap());
+            }
         }
     });
 
