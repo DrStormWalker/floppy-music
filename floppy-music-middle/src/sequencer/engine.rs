@@ -16,20 +16,20 @@ impl<'a> MidiEngine<'a> {
             .flatten()
             .find_map(|event| {
                 if let TrackEventKind::Meta(MetaMessage::Tempo(tempo)) = event.kind {
-                    Some(tempo)
+                    Some(tempo.as_int())
                 } else {
                     None
                 }
             })
-            .unwrap();
+            .unwrap_or(0x07A120);
 
         let timing = match file.header.timing {
-            Timing::Metrical(ppq) => ppq,
+            Timing::Metrical(ppq) => ppq.as_int(),
             _ => unimplemented!("Only the Timing method Metrical is implemented"),
         };
 
         Self {
-            time_controller: TimeController::new(tempo.as_int(), timing.as_int() as u32),
+            time_controller: TimeController::new(tempo, timing as u32),
             file,
         }
     }

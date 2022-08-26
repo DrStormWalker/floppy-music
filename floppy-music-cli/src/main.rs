@@ -181,7 +181,7 @@ fn get_serial_port() -> Result<SerialStream, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = fs::read("/home/jcah/Portal - Still Alive.mid").unwrap();
+    let bytes = fs::read("/home/jcah/Tetris Main Theme Low.mid").unwrap();
     let file = Smf::parse(&bytes).unwrap();
 
     let midi_out = MidiOutput::new("My Test Output")?;
@@ -263,7 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let engine = MidiEngine::new(file);
-    engine.play_to(vec![None, Some(tx)]).await;
+    engine.play_to(vec![Some(tx), None]).await;
 
     Ok(())
 }
