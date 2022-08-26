@@ -25,9 +25,9 @@ pub fn midi_note_periods(input: TokenStream) -> TokenStream {
     let notes = ast
         .range
         .into_iter()
-        .map(|note| ast.a4_freq as f32 * 2.0f32.powf((note as f32 - ast.a4_midi as f32) / 12.0))
-        .map(|freq| 1.0 / freq * 1_000_000.0)
-        .map(|period| period as u32)
+        .map(|note| ast.a4_freq as f64 * 2.0f64.powf((note as f64 - ast.a4_midi as f64) / 12.0))
+        .map(|freq| 0.5 / freq * 1_000_000.0)
+        .map(|period| period as u64)
         .collect::<Vec<_>>();
 
     let expanded = quote! {
