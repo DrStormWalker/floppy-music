@@ -29,7 +29,11 @@ use floppy_music_macros::midi_note_periods;
 use heapless::LinearMap;
 use lock::{SpinLock, TicketLock};
 use lock_api::{GuardSend, RawMutex};
-use midly::{live::LiveEvent, stream::MidiStream, MidiMessage};
+use midly::{
+    live::{LiveEvent, SystemRealtime},
+    stream::MidiStream,
+    MidiMessage,
+};
 use rp_pico::{
     entry,
     hal::{
@@ -101,6 +105,18 @@ impl FloppyDrive {
 
     pub fn get_pitch(&self) -> u8 {
         self.pitch
+    }
+
+    pub fn set_step_count(&mut self, step_count: u16) {
+        self.step_count = step_count;
+    }
+
+    pub fn raw_step(&mut self) {
+        self.step_pin.toggle();
+    }
+
+    pub fn change_direction(&mut self) {
+        self.dir_pin.toggle();
     }
 
     pub fn step(&mut self) {
@@ -189,14 +205,6 @@ fn handle_midi_event(
 
                 let mut used = used.lock();
                 used.insert(key.as_int(), floppy);
-
-                let mut buf = ArrayString::<128>::new();
-                write!(&mut buf, "{:?}", used);
-                serial.write(buf.as_bytes());
-
-                let mut buf = ArrayString::<128>::new();
-                writeln!(&mut buf, "{:?}", stack);
-                serial.write(buf.as_bytes());
             }
         }
         LiveEvent::Midi {
@@ -205,6 +213,16 @@ fn handle_midi_event(
         } => {
             if let Some(floppy) = used.lock().remove(&key.as_int()) {
                 stack.lock().push(floppy);
+            }
+        }
+        LiveEvent::Realtime(SystemRealtime::Reset) => {
+            let mut used = used.lock();
+            let mut stack = stack.lock();
+
+            for pitch in used.keys().copied().collect::<ArrayVec<u8, 10>>() {
+                if let Some(floppy) = used.remove(&pitch) {
+                    stack.push(floppy);
+                }
             }
         }
         _ => {}
@@ -286,6 +304,8 @@ fn main() -> ! {
 
     led_pin.toggle();
 
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+
     let mut stack = ArrayVec::<_, 10>::new();
 
     stack.push(FloppyDrive::new(
@@ -306,6 +326,28 @@ fn main() -> ! {
         pins.gpio6.into_push_pull_output().into(),
     ));
 
+    for i in 0..160 {
+        stack.iter_mut().for_each(|drive| {
+            drive.raw_step();
+        });
+
+        delay.delay_us(500);
+    }
+
+    stack.iter_mut().for_each(|drive| {
+        drive.change_direction();
+    });
+
+    for i in 0..2 {
+        stack.iter_mut().for_each(|drive| {
+            drive.raw_step();
+        });
+    }
+
+    stack.iter_mut().for_each(|drive| {
+        drive.set_step_count(0);
+    });
+
     let channel0_stack = Arc::new(SpinLock::new(stack));
     let channel0_used = Arc::new(SpinLock::new(LinearMap::<_, _, 10>::new()));
 
@@ -319,8 +361,6 @@ fn main() -> ! {
             core1_task(stack, used, usb_dev, serial);
         });
     }
-
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
     let mut last_toggle = 0;
 
