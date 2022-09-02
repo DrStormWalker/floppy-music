@@ -1,7 +1,7 @@
 use std::{net::IpAddr, path::PathBuf};
 
 use clap::Args;
-use rocket::{form::Form, response::Redirect, serde::json::json};
+use rocket::{form::Form, fs::FileServer, response::Redirect, serde::json::json};
 use rocket_auth::{Auth, Login, Signup, User, Users};
 use rocket_dyn_templates::Template;
 use tokio::{select, sync::oneshot};
@@ -21,6 +21,9 @@ pub struct WebArgs {
 
     #[clap(long, default_value = "users.db")]
     users_db: PathBuf,
+
+    #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist"))]
+    static_files: PathBuf,
 }
 
 #[post("/login", data = "<form>")]
@@ -59,7 +62,8 @@ pub async fn start(
         .await;
 
     let rocket = rocket::build()
-        .mount("/", routes![index, get_login, post_login, logout])
+        .mount("/", FileServer::from(args.static_files))
+        .mount("/api", routes![index, get_login, post_login, logout])
         .manage(users)
         .attach(Template::fairing())
         .launch();

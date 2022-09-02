@@ -12,15 +12,15 @@
 
 <body>
 
-    <nav class="navbar navbar-expand-lg navbar-dark bg-danger">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container-fluid">
-            <a class="navbar-brand" href="/">Rocket Auth Example</a>
+            <a class="navbar-brand" href="/">SFCF Flopp Drive Music</a>
             <div>
                 {% if not user %}
                 <a class="navbar-brand" href="/login">Login</a>
                 <a class="navbar-brand" href="/signup">Sign up</a>
                 {% else %}
-                <a class="navbar-brand" href="/logout">Log out</a>
+                <div class="navbar-brand">Logged in as: {{ user.email }} <a class="navbar-brand" href="/logout">Log out</a></div>
                 {% endif %}
             </div>
         </div>
