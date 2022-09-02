@@ -1,4 +1,7 @@
-use midly::{MetaMessage, MidiMessage, Timing, Track, TrackEventKind};
+use midly::{
+    live::{LiveEvent, SystemCommon, SystemRealtime},
+    MetaMessage, MidiMessage, Timing, Track, TrackEventKind,
+};
 use tokio::sync::mpsc;
 
 use super::time_controller::TimeController;
@@ -9,19 +12,7 @@ pub struct MidiEngine<'a> {
 }
 impl<'a> MidiEngine<'a> {
     pub fn new(file: midly::Smf<'a>) -> Self {
-        let tempo = file
-            .tracks
-            .iter()
-            .map(|track| track.iter())
-            .flatten()
-            .find_map(|event| {
-                if let TrackEventKind::Meta(MetaMessage::Tempo(tempo)) = event.kind {
-                    Some(tempo.as_int())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0x07A120);
+        let tempo = 0x07A120;
 
         let timing = match file.header.timing {
             Timing::Metrical(ppq) => ppq.as_int(),
@@ -34,13 +25,36 @@ impl<'a> MidiEngine<'a> {
         }
     }
 
-    pub async fn play_to(&self, outputs: Vec<Option<mpsc::Sender<Vec<u8>>>>) {
+    pub fn play_to(&self, outputs: Vec<Option<mpsc::Sender<Vec<u8>>>>) -> MidiEngineInstance<'a> {
+        MidiEngineInstance::new(self.time_controller, self.file.clone(), outputs)
+    }
+}
+
+pub struct MidiEngineInstance<'a> {
+    time_controller: TimeController,
+    file: midly::Smf<'a>,
+    outputs: Vec<Option<mpsc::Sender<Vec<u8>>>>,
+}
+impl<'a> MidiEngineInstance<'a> {
+    pub fn new(
+        time_controller: TimeController,
+        file: midly::Smf<'a>,
+        outputs: Vec<Option<mpsc::Sender<Vec<u8>>>>,
+    ) -> Self {
+        Self {
+            time_controller,
+            file,
+            outputs,
+        }
+    }
+
+    pub async fn start(&self) {
         let threads = self
             .file
             .tracks
             .iter()
             .enumerate()
-            .zip(outputs.into_iter())
+            .zip(self.outputs.iter().map(|output| output.clone()))
             .filter_map(|((track_num, track), output)| {
                 if let Some(output) = output {
                     Some(async move {
@@ -55,7 +69,7 @@ impl<'a> MidiEngine<'a> {
     }
 
     async fn thread(
-        time_controller: TimeController,
+        mut time_controller: TimeController,
         output: mpsc::Sender<Vec<u8>>,
         track_num: usize,
         track: &Track<'a>,
@@ -73,7 +87,29 @@ impl<'a> MidiEngine<'a> {
 
                     output.send(buf).await.unwrap();
                 }
-                _ => {}
+                _ => {
+                    if let TrackEventKind::Meta(msg) = event {
+                        match msg {
+                            MetaMessage::Tempo(tempo) => time_controller.set_tempo(tempo.as_int()),
+                            _ => {}
+                        }
+                    } else {
+                        unreachable!();
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn cleanup(&self) {
+        let mut buf = vec![];
+        LiveEvent::Realtime(SystemRealtime::Reset)
+            .write_std(&mut buf)
+            .unwrap();
+
+        for output in self.outputs.iter() {
+            if let Some(output) = output {
+                output.send(buf.clone()).await.unwrap();
             }
         }
     }

@@ -12,3 +12,9 @@ tokio-serial = "5.4.3"
 midir = { version = "0.8.0", features = [] }
 floppy-music-middle = { path = "../floppy-music-middle" }
 midly = "0.5.2"
+ctrlc = "3.2.3"
+inquire = "0.3.0"
+clap = { version = "3.2.18", features = ["derive"] }
+rocket = { version = "0.5.0-rc.2", features = ["json"] }
+rocket_auth = { version = "0.4.0", features = ["rusqlite"] }
+rocket_dyn_templates = { version = "0.1.0-rc.2", features = ["tera"] }
