@@ -1,7 +1,13 @@
 use std::{net::IpAddr, path::PathBuf};
 
 use clap::Args;
-use rocket::{form::Form, fs::FileServer, response::Redirect, serde::json::json};
+use rocket::{
+    form::Form,
+    fs::{FileServer, NamedFile},
+    response::Redirect,
+    serde::json::json,
+    State,
+};
 use rocket_auth::{Auth, Login, Signup, User, Users};
 use rocket_dyn_templates::Template;
 use tokio::{select, sync::oneshot};
@@ -30,24 +36,63 @@ pub struct WebArgs {
 async fn post_login(form: Form<Login>, auth: Auth<'_>) -> Result<Redirect, rocket_auth::Error> {
     let result = auth.login(&form).await;
     println!("login attempt: {:?}", result);
+
     result?;
+
+    //Ok(Json(auth.get_user().await.unwrap()))
     Ok(Redirect::to("/"))
 }
 
+#[derive(Responder)]
+enum LoginResponse {
+    LoggedIn(Redirect),
+    NotLoggedIn(NamedFile),
+}
+
 #[get("/login")]
-fn get_login() -> Template {
-    Template::render("login", json!({}))
+async fn get_login(args: &State<WebArgs>, user: Option<User>) -> LoginResponse {
+    if user.is_some() {
+        return LoginResponse::LoggedIn(Redirect::to("/"));
+    }
+
+    LoginResponse::NotLoggedIn(
+        NamedFile::open(args.inner().static_files.join("index.html"))
+            .await
+            .unwrap(),
+    )
 }
 
 #[get("/logout")]
-fn logout(auth: Auth<'_>) -> Result<Template, rocket_auth::Error> {
+fn api_logout(auth: Auth<'_>) -> Result<(), rocket_auth::Error> {
     auth.logout()?;
-    Ok(Template::render("logout", json!({})))
+
+    Ok(())
+}
+
+#[get("/logout")]
+fn logout(auth: Auth<'_>) -> Result<Redirect, rocket_auth::Error> {
+    auth.logout()?;
+
+    Ok(Redirect::to("/login"))
+}
+
+#[derive(Responder)]
+enum IndexResponse {
+    NotLoggedIn(Redirect),
+    LoggedIn(NamedFile),
 }
 
 #[get("/")]
-async fn index(user: Option<User>) -> Template {
-    Template::render("index", json!({ "user": user }))
+async fn index(args: &State<WebArgs>, user: Option<User>) -> IndexResponse {
+    if user.is_none() {
+        return IndexResponse::NotLoggedIn(Redirect::to("/login"));
+    };
+
+    IndexResponse::LoggedIn(
+        NamedFile::open(args.inner().static_files.join("index.html"))
+            .await
+            .unwrap(),
+    )
 }
 
 pub async fn start(
@@ -55,15 +100,17 @@ pub async fn start(
     common: CommonArgs,
     signal_rx: oneshot::Receiver<ProgramSignal>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let users = Users::open_rusqlite(args.users_db)?;
+    let users = Users::open_rusqlite(&args.users_db)?;
 
     let _ = users
         .create_user("josephcahunt@jcah.uk", "1234", true)
         .await;
 
     let rocket = rocket::build()
-        .mount("/", FileServer::from(args.static_files))
-        .mount("/api", routes![index, get_login, post_login, logout])
+        .mount("/", routes![index, get_login, logout])
+        .mount("/", FileServer::from(&args.static_files))
+        .mount("/api/v1", routes![post_login, api_logout])
+        .manage(args)
         .manage(users)
         .attach(Template::fairing())
         .launch();
