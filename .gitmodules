@@ -1,0 +1,3 @@
+[submodule "floppy-music-cli/frontend"]
+	path = floppy-music-cli/frontend
+	url = https://github.com/DrStormWalker/floppy-music-frontend.git
