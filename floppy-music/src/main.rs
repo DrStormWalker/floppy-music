@@ -152,10 +152,18 @@ static mut CORE1_STACK: Stack<4096> = Stack::new();
 
 type FloppyStack = Arc<SpinLock<ArrayVec<FloppyDrive, 10>>>;
 type FloppyUsed = Arc<SpinLock<LinearMap<u8, FloppyDrive, 10>>>;
+type StateContainer = Arc<SpinLock<State>>;
+
+#[derive(Copy, Clone)]
+enum State {
+    Running,
+    Paused,
+}
 
 fn core1_task(
     stack: FloppyStack,
     used: FloppyUsed,
+    state: StateContainer,
     mut usb_dev: UsbDevice<UsbBus>,
     mut serial: SerialPort<UsbBus>,
 ) -> ! {
@@ -176,7 +184,7 @@ fn core1_task(
                 Err(_e) => {}
                 Ok(0) => {}
                 Ok(len) => midi_stream.feed(&buf[..len], |event| {
-                    handle_midi_event(&stack, &used, &mut serial, event)
+                    handle_midi_event(&stack, &used, &state, &mut serial, event)
                 }),
             }
         }
@@ -186,6 +194,7 @@ fn core1_task(
 fn handle_midi_event(
     stack: &FloppyStack,
     used: &FloppyUsed,
+    state: &StateContainer,
     serial: &mut SerialPort<UsbBus>,
     event: LiveEvent,
 ) {
@@ -218,12 +227,25 @@ fn handle_midi_event(
         LiveEvent::Realtime(SystemRealtime::Reset) => {
             let mut used = used.lock();
             let mut stack = stack.lock();
+            let mut state = state.lock();
 
             for pitch in used.keys().copied().collect::<ArrayVec<u8, 10>>() {
                 if let Some(floppy) = used.remove(&pitch) {
                     stack.push(floppy);
                 }
             }
+
+            *state = State::Running;
+        }
+        LiveEvent::Realtime(SystemRealtime::Stop) => {
+            let mut state = state.lock();
+
+            *state = State::Paused;
+        }
+        LiveEvent::Realtime(SystemRealtime::Start | SystemRealtime::Continue) => {
+            let mut state = state.lock();
+
+            *state = State::Running;
         }
         _ => {}
     }
@@ -350,15 +372,16 @@ fn main() -> ! {
 
     let channel0_stack = Arc::new(SpinLock::new(stack));
     let channel0_used = Arc::new(SpinLock::new(LinearMap::<_, _, 10>::new()));
+    let state = Arc::new(SpinLock::new(State::Running));
 
     // Set up second core for execution
     let mut mc = multicore::Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
     let cores = mc.cores();
     let core1 = &mut cores[1];
     {
-        let (stack, used) = (channel0_stack.clone(), channel0_used.clone());
+        let (stack, used, state) = (channel0_stack.clone(), channel0_used.clone(), state.clone());
         let _core1_task = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
-            core1_task(stack, used, usb_dev, serial);
+            core1_task(stack, used, state, usb_dev, serial);
         });
     }
 
@@ -369,6 +392,19 @@ fn main() -> ! {
     led_pin.toggle();
 
     loop {
+        let state = {
+            let state = state.lock();
+            let copy = *state;
+            drop(state);
+
+            copy
+        };
+
+        if let State::Paused = state {
+            delay.delay_us(100);
+            continue;
+        }
+
         let time_delay = {
             let mut channel0 = channel0_used.lock();
 

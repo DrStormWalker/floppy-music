@@ -134,7 +134,7 @@ pub async fn start(
     signal_rx: oneshot::Receiver<ProgramSignal>,
 ) -> Result<(), Box<dyn Error>> {
     let bytes = fs::read(args.filepath).unwrap();
-    let file = Smf::parse(&bytes).unwrap();
+    // let file = Smf::parse(&bytes).unwrap();
 
     //let (midi_out, out_port) = get_midi_out()?;
 
@@ -187,32 +187,29 @@ pub async fn start(
         }
     });
 
-    let mut track_map = vec![None; file.tracks.len()];
+    // let mut track_map = vec![None; file.tracks.len()];
 
-    if args.all_tracks {
-        for i in 0..track_map.len() {
-            track_map[i] = Some(tx.clone());
-        }
-    } else {
-        for i in args.tracks {
-            if let Some(track) = track_map.get_mut(i) {
-                *track = Some(tx.clone());
-            }
-        }
-    }
+    // if args.all_tracks {
+    //     for i in 0..track_map.len() {
+    //         track_map[i] = Some(tx.clone());
+    //     }
+    // } else {
+    //     for i in args.tracks {
+    //         if let Some(track) = track_map.get_mut(i) {
+    //             *track = Some(tx.clone());
+    //         }
+    //     }
+    // }
 
-    let engine = MidiEngine::new(file);
-    let instance = engine.play_to(track_map);
+    let mut engine = MidiEngine::new();
+    engine.play_to(&bytes, tx).await;
 
     let _signal = select! {
-        _ = instance.start() => None,
+        _ = engine.until_stopped() => None,
         signal = signal_rx => Some(signal),
     };
 
-    instance.cleanup().await;
-
-    drop(tx);
-    drop(instance);
+    engine.stop();
 
     passthrough_task.await;
 
