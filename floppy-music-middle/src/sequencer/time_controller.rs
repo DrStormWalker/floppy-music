@@ -19,10 +19,19 @@ impl TimeController {
 
     pub fn set_tempo(&mut self, tempo: u32) {
         self.tempo = tempo;
-        self.tick_length = tempo / self.ppq;
+        self.update_tick();
     }
 
     pub fn delta_micros(&self, delta: u32) -> u32 {
         self.tick_length * delta
+    }
+
+    pub fn set_ppq(&mut self, ppq: u32) {
+        self.ppq = ppq;
+        self.update_tick();
+    }
+
+    fn update_tick(&mut self) {
+        self.tick_length = self.tempo / self.ppq;
     }
 }
