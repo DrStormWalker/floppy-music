@@ -196,6 +196,7 @@ pub async fn start(
                 get_status,
                 get_pause,
                 get_resume,
+                post_play_msg,
             ],
         )
         .mount("/api/v1/events", routes![panel_stream])

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use floppy_music_middle::sequencer::{EngineState, MidiEngine};
+use midly::live::LiveEvent;
 use rocket::{
+    form::Form,
     response::status::{Conflict, NotFound},
     serde::{json::Json, Serialize},
     State,
@@ -100,4 +102,18 @@ pub async fn get_play(
     events_tx.send(PanelEventType::PlayingFileChanged);
 
     Ok(())
+}
+
+#[post("/play/msg", data = "<msg>")]
+pub async fn post_play_msg(
+    user: User,
+    pi_tx: &State<mpsc::Sender<Vec<u8>>>,
+    msg: Vec<u8>,
+) -> Result<(), ()> {
+    println!("Buffer: {:?}", msg);
+    let event = LiveEvent::parse(&msg).map_err(|e| ())?;
+
+    println!("Event: {:?}", event);
+
+    pi_tx.inner().send(msg.clone()).await.map_err(|e| ())
 }
