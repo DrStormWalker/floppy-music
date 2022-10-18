@@ -23,3 +23,6 @@ notify = "5.0.0"
 thiserror = "1.0.33"
 tokio-stream = { version = "0.1.9", features = ["sync"] }
 serde = "1.0.144"
+toml = "0.5.9"
+async-walkdir = "0.2.0"
+anyhow = "1.0.65"

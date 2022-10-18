@@ -65,6 +65,15 @@ pub async fn get_pause(
         .map_err(|_| Conflict(Some("Engine is not running".to_string())))
 }
 
+#[get("/stop")]
+pub async fn get_stop(
+    user: User,
+    engine: &State<RwLock<MidiEngine>>,
+    events_tx: &State<broadcast::Sender<PanelEventType>>,
+) {
+    engine.write().await.stop().await;
+}
+
 #[get("/play/<file>")]
 pub async fn get_play(
     user: User,
@@ -77,6 +86,9 @@ pub async fn get_play(
 ) -> Result<(), NotFound<String>> {
     let bytes = fs::read(
         file_map
+            .read()
+            .await
+            .map
             .read()
             .await
             .get(file)

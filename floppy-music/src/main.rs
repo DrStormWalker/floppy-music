@@ -13,6 +13,7 @@ use core::{
     marker::PhantomData,
     mem,
     ops::Deref,
+    panic::PanicInfo,
     ptr,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -44,15 +45,13 @@ use rp_pico::{
         usb::UsbBus,
         watchdog, Clock,
     },
-    pac,
+    pac::{self, Peripherals},
 };
 use usb_device::{
     class_prelude::UsbBusAllocator,
     device::{UsbDevice, UsbDeviceBuilder, UsbVidPid},
 };
 use usbd_serial::SerialPort;
-
-use panic_halt as _;
 
 #[global_allocator]
 static GLOBAL_ALLOC: CortexMHeap = CortexMHeap::empty();
@@ -62,31 +61,82 @@ fn oom(_: core::alloc::Layout) -> ! {
     loop {}
 }
 
+#[panic_handler]
+fn panic_handler(info: &PanicInfo) -> ! {
+    let mut pac = unsafe { pac::Peripherals::steal() };
+    let core = unsafe { pac::CorePeripherals::steal() };
+    let mut watchdog = watchdog::Watchdog::new(pac.WATCHDOG);
+
+    let clocks = clocks::init_clocks_and_plls(
+        rp_pico::XOSC_CRYSTAL_FREQ,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    )
+    .ok()
+    .unwrap();
+
+    let mut sio = sio::Sio::new(pac.SIO);
+
+    let pins = gpio::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
+
+    let mut led_pin = pins.gpio25.into_push_pull_output();
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+
+    loop {
+        led_pin.toggle();
+        delay.delay_ms(250);
+    }
+}
+
 /// Array of time periods (in micro-seconds) corresponding to midi notes
 ///
 /// Genertated using a proc macro to evaulate a constant expression see
 /// floppy_music_macros/src/lib.rs for details
 const NOTES: [u64; 128] = midi_note_periods!();
 
+#[derive(Debug, Copy, Clone)]
+struct FloppyDriveStateUpdate<'a> {
+    label: &'a str,
+    pitch: u8,
+}
+
 struct FloppyDrive {
     label: ArrayString<32>,
     step_pin: DynPin,
     dir_pin: DynPin,
+    max_step: u16,
     step_count: u16,
     pitch: u8,
     half_period: u64,
     last_half: u64,
 }
 impl FloppyDrive {
-    pub fn new(label: &str, step_pin: DynPin, dir_pin: DynPin) -> Self {
+    pub fn new(label: &str, step_pin: DynPin, dir_pin: DynPin, max_step: u16) -> Self {
         Self {
             label: ArrayString::from(label).unwrap(),
             step_pin,
             dir_pin,
+            max_step,
             step_count: 0,
             pitch: 0,
             half_period: 0,
             last_half: 0,
+        }
+    }
+
+    pub fn get_state(&self) -> FloppyDriveStateUpdate {
+        FloppyDriveStateUpdate {
+            label: &self.label,
+            pitch: self.pitch,
         }
     }
 
@@ -123,7 +173,7 @@ impl FloppyDrive {
         self.step_pin.toggle();
         self.step_count += 1;
 
-        if self.step_count >= 154 {
+        if self.step_count >= self.max_step {
             self.dir_pin.toggle();
             self.step_count = 0;
         }
@@ -150,8 +200,10 @@ fn core0_task() -> ! {
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 
-type FloppyStack = Arc<SpinLock<ArrayVec<FloppyDrive, 10>>>;
-type FloppyUsed = Arc<SpinLock<LinearMap<u8, FloppyDrive, 10>>>;
+const CHANNEL_SIZE: usize = 6;
+
+type FloppyStack = Arc<SpinLock<ArrayVec<FloppyDrive, CHANNEL_SIZE>>>;
+type FloppyUsed = Arc<SpinLock<LinearMap<u8, FloppyDrive, CHANNEL_SIZE>>>;
 type StateContainer = Arc<SpinLock<State>>;
 
 #[derive(Copy, Clone)]
@@ -203,17 +255,32 @@ fn handle_midi_event(
 
     serial.write(buf.as_bytes());
 
+    {
+        let used = used.lock();
+        let stack = stack.lock();
+
+        let mut buf = ArrayString::<128>::new();
+        writeln!(&mut buf, "{:?} {:?}", stack, used);
+
+        serial.write(buf.as_bytes());
+    }
+
     match event {
         LiveEvent::Midi {
             channel,
             message: MidiMessage::NoteOn { key, vel },
         } => {
             let mut stack = stack.lock();
+
             if let Some(mut floppy) = stack.pop() {
                 floppy.set_pitch(key.as_int());
 
                 let mut used = used.lock();
-                used.insert(key.as_int(), floppy);
+                if !used.contains_key(&key.as_int()) {
+                    used.insert(key.as_int(), floppy);
+                } else {
+                    stack.push(floppy)
+                }
             }
         }
         LiveEvent::Midi {
@@ -225,8 +292,7 @@ fn handle_midi_event(
             }
         }
         LiveEvent::Realtime(SystemRealtime::Reset) => {
-            let mut used = used.lock();
-            let mut stack = stack.lock();
+            let (mut stack, mut used) = (stack.lock(), used.lock());
             let mut state = state.lock();
 
             for pitch in used.keys().copied().collect::<ArrayVec<u8, 10>>() {
@@ -256,7 +322,7 @@ static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
 #[entry]
 fn main() -> ! {
     let start = cortex_m_rt::heap_start() as usize;
-    let size = 4096;
+    let size = 8192;
     unsafe { GLOBAL_ALLOC.init(start, size) }
 
     let mut pac = pac::Peripherals::take().unwrap();
@@ -301,7 +367,7 @@ fn main() -> ! {
 
     let bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
 
-    let serial = SerialPort::new(&bus_ref);
+    let mut serial = SerialPort::new(&bus_ref);
 
     let usb_dev = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27dd))
         .manufacturer("Fake company")
@@ -322,31 +388,58 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let mut led_pin = pins.gpio25.into_push_pull_output();
-
-    led_pin.toggle();
-
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
-    let mut stack = ArrayVec::<_, 10>::new();
+    let mut stack = ArrayVec::<_, CHANNEL_SIZE>::new();
 
     stack.push(FloppyDrive::new(
         "Floppy 1",
         pins.gpio3.into_push_pull_output().into(),
         pins.gpio2.into_push_pull_output().into(),
+        154,
     ));
 
     stack.push(FloppyDrive::new(
         "Floppy 2",
         pins.gpio5.into_push_pull_output().into(),
         pins.gpio4.into_push_pull_output().into(),
+        154,
     ));
 
     stack.push(FloppyDrive::new(
         "Floppy 3",
         pins.gpio7.into_push_pull_output().into(),
         pins.gpio6.into_push_pull_output().into(),
+        154,
     ));
+
+    stack.push(FloppyDrive::new(
+        "Floppy 4",
+        pins.gpio9.into_push_pull_output().into(),
+        pins.gpio8.into_push_pull_output().into(),
+        154,
+    ));
+
+    stack.push(FloppyDrive::new(
+        "Floppy 5",
+        pins.gpio11.into_push_pull_output().into(),
+        pins.gpio10.into_push_pull_output().into(),
+        154,
+    ));
+
+    stack.push(FloppyDrive::new(
+        "Floppy 6",
+        pins.gpio13.into_push_pull_output().into(),
+        pins.gpio12.into_push_pull_output().into(),
+        154,
+    ));
+
+    // stack.push(FloppyDrive::new(
+    //     r#"5.25" Floppy Drive 1"#,
+    //     pins.gpio15.into_push_pull_output().into(),
+    //     pins.gpio14.into_push_pull_output().into(),
+    //     74,
+    // ));
 
     for i in 0..160 {
         stack.iter_mut().for_each(|drive| {
@@ -370,16 +463,18 @@ fn main() -> ! {
         drive.set_step_count(0);
     });
 
-    let channel0_stack = Arc::new(SpinLock::new(stack));
-    let channel0_used = Arc::new(SpinLock::new(LinearMap::<_, _, 10>::new()));
+    let stack = Arc::new(SpinLock::new(stack));
+    let used = Arc::new(SpinLock::new(LinearMap::<_, _, CHANNEL_SIZE>::new()));
     let state = Arc::new(SpinLock::new(State::Running));
+
+    serial.write(b"Ready\n");
 
     // Set up second core for execution
     let mut mc = multicore::Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
     let cores = mc.cores();
     let core1 = &mut cores[1];
     {
-        let (stack, used, state) = (channel0_stack.clone(), channel0_used.clone(), state.clone());
+        let (stack, used, state) = (stack.clone(), used.clone(), state.clone());
         let _core1_task = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || {
             core1_task(stack, used, state, usb_dev, serial);
         });
@@ -388,8 +483,6 @@ fn main() -> ! {
     let mut last_toggle = 0;
 
     let mut count = 0u64;
-
-    led_pin.toggle();
 
     loop {
         let state = {
@@ -406,10 +499,9 @@ fn main() -> ! {
         }
 
         let time_delay = {
-            let mut channel0 = channel0_used.lock();
+            let mut used = used.lock();
 
-            channel0
-                .values_mut()
+            used.values_mut()
                 .map(|drive| {
                     if count >= drive.get_last_half() + drive.get_half_period() {
                         drive.step();
@@ -421,11 +513,6 @@ fn main() -> ! {
                 .min()
                 .unwrap_or(100)
         };
-
-        /*if count >= last_toggle + 1_000_000 {
-            led_pin.toggle().unwrap();
-            last_toggle = count;
-        }*/
 
         delay.delay_us(time_delay as u32);
         count += time_delay;

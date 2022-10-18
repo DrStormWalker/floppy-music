@@ -11,6 +11,7 @@ use std::{
     str::FromStr,
 };
 
+use anyhow::{anyhow, Result as AnyResult};
 use clap::{clap_derive::ArgEnum, Args, Parser, Subcommand, ValueEnum};
 use cli::CliArgs;
 use floppy_music_middle::sequencer::MidiEngine;
@@ -59,7 +60,7 @@ pub enum ProgramSignal {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> AnyResult<()> {
     let args = Cli::parse();
 
     let (signal_tx, signal_rx) = oneshot::channel();
@@ -72,6 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         completed_tx.send(());
+        
+        println!("Result: {:?}", result);
+
+        result
     });
 
     let cancelled = select! {
@@ -80,11 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if cancelled {
-        signal_tx.send(ProgramSignal::Cancelled).unwrap();
+        let _ = signal_tx.send(ProgramSignal::Cancelled);
 
-        program.await;
+        let result = program.await?;
+        
+        //println!("Result? {:?}", result);
 
-        Err("Cancelled".into())
+        Err(anyhow!("Cancelled"))
     } else {
         Ok(())
     }

@@ -6,6 +6,7 @@ use std::{
     str::FromStr,
 };
 
+use anyhow::{bail, Result as AnyResult};
 use clap::{clap_derive::ArgEnum, Args, Parser, ValueEnum};
 use floppy_music_middle::sequencer::MidiEngine;
 use midir::{MidiOutput, MidiOutputPort};
@@ -35,13 +36,13 @@ pub struct CliArgs {
     all_tracks: bool,
 }
 
-pub fn get_serial_port(port: Option<String>) -> Result<SerialStream, Box<dyn std::error::Error>> {
+pub fn get_serial_port(port: Option<String>) -> AnyResult<SerialStream> {
     let ports = tokio_serial::available_ports()?;
 
     let port = match port {
         Some(port) => port,
         None => match ports.len() {
-            0 => return Err("No available serial ports".into()),
+            0 => bail!("No available serial ports"),
             1 => {
                 println!(
                     "Choosing the only available serial port: {}",
@@ -93,13 +94,13 @@ pub fn get_serial_port(port: Option<String>) -> Result<SerialStream, Box<dyn std
     Ok(port)
 }
 
-fn get_midi_out() -> Result<(MidiOutput, MidiOutputPort), Box<dyn std::error::Error>> {
+fn get_midi_out() -> AnyResult<(MidiOutput, MidiOutputPort)> {
     let midi_out = MidiOutput::new("My Test Output")?;
 
     // Get an output port (read from console if multiple are available)
     let out_ports = midi_out.ports();
     let out_port = match out_ports.len() {
-        0 => return Err("No available MIDI ports".into()),
+        0 => bail!("No available MIDI ports"),
         1 => {
             println!(
                 "Choosing the only available output port: {}",
@@ -132,7 +133,7 @@ pub async fn start(
     args: CliArgs,
     common: CommonArgs,
     signal_rx: oneshot::Receiver<ProgramSignal>,
-) -> Result<(), Box<dyn Error>> {
+) -> AnyResult<()> {
     let bytes = fs::read(args.filepath).unwrap();
     // let file = Smf::parse(&bytes).unwrap();
 

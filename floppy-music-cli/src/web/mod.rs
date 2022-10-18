@@ -4,6 +4,7 @@ pub mod stream;
 
 use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
+use anyhow::Result as AnyResult;
 use clap::Args;
 use floppy_music_middle::sequencer::MidiEngine;
 use rocket::{
@@ -25,7 +26,7 @@ use tokio_serial::SerialStream;
 use crate::web::{
     files::*,
     play::*,
-    stream::{panel_stream, PanelEventType},
+    stream::{log_stream, panel_stream, PanelEventType},
 };
 use crate::{CommonArgs, ProgramSignal};
 
@@ -46,7 +47,7 @@ pub struct WebArgs {
     #[clap(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist"))]
     static_files: PathBuf,
 
-    #[clap(long)]
+    #[clap(long, default_value = "/dev/ttyACM0")]
     serial_port: String,
 }
 
@@ -117,7 +118,7 @@ pub async fn start(
     args: WebArgs,
     common: CommonArgs,
     signal_rx: oneshot::Receiver<ProgramSignal>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> AnyResult<()> {
     let users = Users::open_rusqlite(&args.users_db)?;
 
     let _ = users
@@ -128,24 +129,39 @@ pub async fn start(
 
     let _ = users.create_user("2@jcah.uk", "2345", false).await;
 
-    let files = create_file_map(&args.midi_files).await?;
+    let mut files = FileMap::new("midi-meta.toml", &args.midi_files);
+    files.refresh_from_dir().await?;
 
-    let pi_tx = {
+    let (pi_tx, pi_rx) = {
         let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(100);
+        let (in_tx, in_rx) = broadcast::channel(100);
 
-        let mut serial_port = SerialStream::open(&tokio_serial::new(&args.serial_port, 115_200))?;
+        let serial_port = SerialStream::open(&tokio_serial::new(&args.serial_port, 115_200));
 
         tokio::spawn(async move {
-            loop {
-                let mut buf = [0u8; 256];
+            if let Ok(mut serial_port) = serial_port {
+                loop {
+                    let mut buf = [0u8; 256];
+                    tokio::select! {
+                        val = serial_port.read(&mut buf[..]) => {
+                            if let Ok(len) = val {
+                                let _ = in_tx.send(String::from_utf8(buf[..len].to_vec()).unwrap());
+                            }
+                        }
 
-                if let Some(msg) = out_rx.recv().await {
-                    let _ = serial_port.write(msg.as_slice()).await;
+                        Some(msg) = out_rx.recv() => {
+                            let _ = serial_port.write(msg.as_slice()).await;
+                        }
+
+                        else => {}
+                    }
                 }
+            } else {
+                loop {}
             }
         });
 
-        out_tx
+        (out_tx, in_rx)
     };
 
     let (event_tx, event_rx) = broadcast::channel::<PanelEventType>(10);
@@ -179,7 +195,19 @@ pub async fn start(
         });
     }
 
+    {
+        let mut pi_rx = pi_rx.resubscribe();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(msg) = pi_rx.recv().await {
+                    print!("{}", msg);
+                }
+            }
+        });
+    }
+
     let engine = RwLock::new(engine);
+    let files = Arc::new(RwLock::new(files));
 
     let rocket = rocket::build()
         .mount("/", routes![index, get_login, logout])
@@ -196,10 +224,11 @@ pub async fn start(
                 get_status,
                 get_pause,
                 get_resume,
+                get_stop,
                 post_play_msg,
             ],
         )
-        .mount("/api/v1/events", routes![panel_stream])
+        .mount("/api/v1/events", routes![panel_stream, log_stream])
         .manage(files)
         .manage(args)
         .manage(users)
@@ -207,6 +236,7 @@ pub async fn start(
         .manage(pi_tx)
         .manage(event_tx)
         .manage(event_rx)
+        .manage(pi_rx)
         .manage(playing)
         .attach(Template::fairing())
         .launch();

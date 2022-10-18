@@ -8,7 +8,11 @@ use midly::{
     MetaMessage, MidiMessage, Timing, Track, TrackEventKind,
 };
 use serde::Serialize;
-use tokio::{select, sync::mpsc, time::Instant};
+use tokio::{
+    select,
+    sync::{mpsc, RwLock},
+    time::Instant,
+};
 
 use super::{time_controller::TimeController, watch};
 
@@ -79,7 +83,7 @@ impl EngineState {
 }
 
 pub struct MidiEngine {
-    time_controller: TimeController,
+    time_controller: Arc<RwLock<TimeController>>,
     state_watch: watch::Sender<EngineState>,
     instance_count: Arc<AtomicUsize>,
 }
@@ -89,7 +93,7 @@ impl MidiEngine {
         let (state_watch, _) = watch::channel(EngineState::Stopped);
 
         Self {
-            time_controller: TimeController::new(tempo, 1),
+            time_controller: Arc::new(RwLock::new(TimeController::new(tempo, 1))),
             state_watch,
             instance_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -106,7 +110,7 @@ impl MidiEngine {
 
         let mut rx = self.state_watch.subscribe();
         let tx = self.state_watch.clone();
-        let mut time_controller = self.time_controller;
+        let mut time_controller = self.time_controller.clone();
 
         async fn until_stopping(mut rx: watch::Receiver<EngineState>) {
             while rx.changed().await.is_ok() {
@@ -128,7 +132,7 @@ impl MidiEngine {
                 _ => unimplemented!("Only the Timing method Metrical is implemented"),
             };
 
-            time_controller.set_ppq(timing as u32);
+            time_controller.write().await.set_ppq(timing as u32);
 
             let mut threads = file
                 .tracks
@@ -136,7 +140,7 @@ impl MidiEngine {
                 .map(|track| {
                     let rx = tx.subscribe();
 
-                    MidiEngineThread::new(time_controller, output.clone(), track)
+                    MidiEngineThread::new(time_controller.clone(), output.clone(), track)
                 })
                 .collect::<Vec<_>>();
 
@@ -187,7 +191,7 @@ impl MidiEngine {
     }
 
     pub async fn stop(&mut self) {
-        self.state_watch.send(EngineState::Stopping);
+        self.state_watch.send(EngineState::Stopping).unwrap();
 
         self.until_stopped().await;
     }
@@ -230,13 +234,13 @@ impl MidiEngine {
 }
 
 struct MidiEngineThread<'a> {
-    time_controller: TimeController,
+    time_controller: Arc<RwLock<TimeController>>,
     output: mpsc::Sender<Vec<u8>>,
     track: Track<'a>,
 }
 impl<'a> MidiEngineThread<'a> {
     pub fn new(
-        time_controller: TimeController,
+        time_controller: Arc<RwLock<TimeController>>,
         output: mpsc::Sender<Vec<u8>>,
         track: Track<'a>,
     ) -> Self {
@@ -264,7 +268,10 @@ impl<'a> MidiEngineThread<'a> {
     pub async fn run(&mut self, mut rx: watch::Receiver<EngineState>) {
         for event in self.track.iter() {
             let sleep = tokio::time::sleep(tokio::time::Duration::from_micros(
-                self.time_controller.delta_micros(event.delta.as_int()) as u64,
+                self.time_controller
+                    .read()
+                    .await
+                    .delta_micros(event.delta.as_int()) as u64,
             ));
             tokio::pin!(sleep);
 
@@ -288,7 +295,7 @@ impl<'a> MidiEngineThread<'a> {
                     if let TrackEventKind::Meta(msg) = event {
                         match msg {
                             MetaMessage::Tempo(tempo) => {
-                                self.time_controller.set_tempo(tempo.as_int())
+                                self.time_controller.write().await.set_tempo(tempo.as_int())
                             }
                             _ => {}
                         }

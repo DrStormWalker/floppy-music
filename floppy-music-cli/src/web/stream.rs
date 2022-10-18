@@ -37,3 +37,10 @@ pub fn panel_stream(rx: &State<broadcast::Receiver<PanelEventType>>, user: User)
         }))
     }))
 }
+
+#[get("/logs")]
+pub fn log_stream(rx: &State<broadcast::Receiver<String>>, user: User) -> EventStream![] {
+    EventStream::from(
+        BroadcastStream::new(rx.resubscribe()).filter_map(|e| Some(Event::json(&e.ok()?))),
+    )
+}
